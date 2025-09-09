@@ -1,164 +1,491 @@
 #!/bin/sh
-# CheetSheetz - POSIX CLI for developer cheat sheets
-# Single script, no dependencies, syntax highlighting
+# CheetSheetz CLI - POSIX-compliant developer cheat sheet tool
+# Best practices: proper error handling, argument parsing, and modular design
 
-set -e
+set -euo pipefail
 
-VERSION="1.0.0"
-PROGRAM_NAME="cheatsheetz"
-GITHUB_ORG="cheatsheetz"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$PROGRAM_NAME"
+# Program information
+readonly PROGRAM_NAME="cheatsheetz"
+readonly VERSION="1.0.0"
+readonly GITHUB_ORG="cheatsheetz"
 
-# POSIX colors
-if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
-    BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+# Configuration
+readonly CACHE_DIR="${CHEATSHEETZ_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/$PROGRAM_NAME}"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$PROGRAM_NAME"
+readonly CACHE_EXPIRY=3600  # 1 hour
+readonly API_BASE="${CHEATSHEETZ_API:-https://api.github.com}"
+
+# Color support (respects NO_COLOR standard)
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    readonly RED='\033[0;31m'
+    readonly GREEN='\033[0;32m'
+    readonly YELLOW='\033[0;33m'
+    readonly BLUE='\033[0;34m'
+    readonly CYAN='\033[0;36m'
+    readonly BOLD='\033[1m'
+    readonly RESET='\033[0m'
 else
-    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; RESET=''
+    readonly RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' RESET=''
 fi
 
-error() { printf "${RED}Error:${RESET} %s\n" "$*" >&2; exit 1; }
-info() { printf "${BLUE}Info:${RESET} %s\n" "$*"; }
-success() { printf "${GREEN}✓${RESET} %s\n" "$*"; }
+# Logging functions with proper levels
+log_error() {
+    printf "${RED}Error:${RESET} %s\n" "$*" >&2
+    exit 1
+}
 
-show_help() {
-cat << 'EOF'
-CheetSheetz CLI - Quick developer reference
+log_info() {
+    [ "${VERBOSE:-0}" = "1" ] && printf "${BLUE}Info:${RESET} %s\n" "$*" >&2
+}
 
-USAGE:
-    cheatsheetz <command> [options]
+log_success() {
+    [ "${QUIET:-0}" = "0" ] && printf "${GREEN}✓${RESET} %s\n" "$*" >&2
+}
 
-COMMANDS:
-    search <term>     Search cheat sheets
-    show <tool>       Display cheat sheet  
-    list              List all sheets
-    categories        Show categories
-    update            Clear cache
-    version           Show version
-    help              Show help
+log_warning() {
+    [ "${QUIET:-0}" = "0" ] && printf "${YELLOW}Warning:${RESET} %s\n" "$*" >&2
+}
 
-OPTIONS:
-    --no-color        Disable colors
-    --format plain    Output format
+# Usage information
+show_usage() {
+    cat << EOF
+${BOLD}CheetSheetz CLI${RESET} - Quick developer reference
 
-EXAMPLES:
-    cheatsheetz show git
-    cheatsheetz search docker
-    cheatsheetz list
+${BOLD}USAGE:${RESET}
+    $PROGRAM_NAME [OPTIONS] COMMAND [ARGS]
+
+${BOLD}COMMANDS:${RESET}
+    ${CYAN}search${RESET} <term>         Search cheat sheets
+    ${CYAN}show${RESET} <tool>           Display cheat sheet
+    ${CYAN}list${RESET}                 List all available sheets
+    ${CYAN}categories${RESET}           Show available categories
+    ${CYAN}update${RESET}               Update local cache
+    ${CYAN}config${RESET}               Show configuration
+    ${CYAN}version${RESET}              Show version information
+    ${CYAN}help${RESET}                 Show this help
+
+${BOLD}OPTIONS:${RESET}
+    ${CYAN}-h, --help${RESET}           Show help
+    ${CYAN}-v, --version${RESET}        Show version
+    ${CYAN}-q, --quiet${RESET}          Suppress info messages
+    ${CYAN}-V, --verbose${RESET}        Enable verbose output
+    ${CYAN}-n, --no-color${RESET}       Disable colored output
+    ${CYAN}-f, --format${RESET} FORMAT  Output format (plain|markdown|json)
+
+${BOLD}EXAMPLES:${RESET}
+    $PROGRAM_NAME show git
+    $PROGRAM_NAME search docker
+    $PROGRAM_NAME list
+    $PROGRAM_NAME show python --format markdown --no-color
+
+${BOLD}ENVIRONMENT:${RESET}
+    NO_COLOR          Disable colored output
+    CHEATSHEETZ_CACHE Cache directory override
+    CHEATSHEETZ_API   API base URL override
+
 EOF
 }
 
-# Cache management
-ensure_cache() { mkdir -p "$CACHE_DIR"; }
+# Utility functions
+ensure_cache_dir() {
+    mkdir -p "$CACHE_DIR" || log_error "Cannot create cache directory: $CACHE_DIR"
+}
 
+# Check if cache file is valid (not expired)
 is_cache_valid() {
-    local file="$1"
-    [ -f "$file" ] && [ $(($(date +%s) - $(stat -c %Y "$file" 2>/dev/null || echo 0))) -lt 3600 ]
+    local cache_file="$1"
+    
+    [ -f "$cache_file" ] || return 1
+    
+    # Cross-platform file age check
+    local file_time current_time age
+    file_time=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
+    current_time=$(date +%s)
+    age=$((current_time - file_time))
+    
+    [ "$age" -lt "$CACHE_EXPIRY" ]
 }
 
-# GitHub API calls
-fetch_repos() {
-    local cache="$CACHE_DIR/repos.txt"
-    if is_cache_valid "$cache"; then cat "$cache"; return; fi
+# Download content with error handling
+download_content() {
+    local url="$1"
+    local output="$2"
     
-    info "Fetching repository list..."
-    ensure_cache
+    log_info "Downloading from $url"
     
     if command -v curl >/dev/null 2>&1; then
-        curl -s "https://api.github.com/orgs/$GITHUB_ORG/repos?per_page=100" | \
-        sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' | \
-        grep -v -E "(cheatsheetz.github.io|community|template|cli)" > "$cache"
+        curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "User-Agent: CheetSheetz-CLI/$VERSION" \
+            "$url" > "$output"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q \
+            --header="Accept: application/vnd.github.v3+json" \
+            --header="User-Agent: CheetSheetz-CLI/$VERSION" \
+            -O "$output" \
+            "$url"
     else
-        echo "git\ndocker\npython\njavascript" > "$cache"
+        log_error "Neither curl nor wget found. Please install one of them."
     fi
-    cat "$cache"
 }
 
-fetch_sheet() {
+# Fetch repository list from GitHub API
+fetch_repositories() {
+    local cache_file="$CACHE_DIR/repositories.json"
+    
+    if is_cache_valid "$cache_file"; then
+        log_info "Using cached repository list"
+        cat "$cache_file"
+        return
+    fi
+    
+    log_info "Fetching repository list from GitHub API..."
+    ensure_cache_dir
+    
+    local api_url="$API_BASE/orgs/$GITHUB_ORG/repos?per_page=100&sort=name"
+    local temp_file
+    temp_file=$(mktemp) || log_error "Cannot create temporary file"
+    
+    # Ensure cleanup on exit
+    trap "rm -f '$temp_file'" EXIT INT TERM
+    
+    if download_content "$api_url" "$temp_file"; then
+        cp "$temp_file" "$cache_file"
+        cat "$cache_file"
+    else
+        log_error "Failed to fetch repository list from GitHub API"
+    fi
+}
+
+# Fetch individual cheat sheet content
+fetch_cheat_sheet() {
     local tool="$1"
-    local cache="$CACHE_DIR/$tool.md"
-    if is_cache_valid "$cache"; then cat "$cache"; return; fi
+    local cache_file="$CACHE_DIR/${tool}.md"
     
-    info "Fetching $tool cheat sheet..."
-    ensure_cache
-    
-    if command -v curl >/dev/null 2>&1; then
-        curl -s -H "Accept: application/vnd.github.v3.raw" \
-            "https://api.github.com/repos/$GITHUB_ORG/$tool/contents/README.md" > "$cache" 2>/dev/null || \
-            error "Cheat sheet '$tool' not found"
-    else
-        error "curl required for fetching cheat sheets"
+    if is_cache_valid "$cache_file"; then
+        log_info "Using cached cheat sheet for $tool"
+        cat "$cache_file"
+        return
     fi
-    cat "$cache"
+    
+    log_info "Fetching $tool cheat sheet..."
+    ensure_cache_dir
+    
+    local temp_file
+    temp_file=$(mktemp) || log_error "Cannot create temporary file"
+    trap "rm -f '$temp_file'" EXIT INT TERM
+    
+    # Try raw GitHub content first (faster and simpler)
+    local raw_url="https://raw.githubusercontent.com/$GITHUB_ORG/$tool/main/README.md"
+    if download_content "$raw_url" "$temp_file" 2>/dev/null; then
+        cp "$temp_file" "$cache_file"
+        cat "$cache_file"
+        return
+    fi
+    
+    # Fallback to GitHub API
+    local api_url="$API_BASE/repos/$GITHUB_ORG/$tool/contents/README.md"
+    if download_content "$api_url" "$temp_file" 2>/dev/null; then
+        # Check if it's a 404 JSON response
+        if grep -q '"message".*"Not Found"' "$temp_file" 2>/dev/null; then
+            log_error "Cheat sheet '$tool' not found"
+        else
+            # Try to decode base64 content if it's GitHub API JSON
+            if grep -q '"content":' "$temp_file" 2>/dev/null; then
+                sed -n 's/.*"content": *"\([^"]*\)".*/\1/p' "$temp_file" | \
+                tr -d '[:space:]' | \
+                base64 -d > "$cache_file" 2>/dev/null || {
+                    log_warning "Failed to decode base64 content, using raw response"
+                    cp "$temp_file" "$cache_file"
+                }
+            else
+                cp "$temp_file" "$cache_file"
+            fi
+            cat "$cache_file"
+        fi
+    else
+        log_error "Cheat sheet '$tool' not found"
+    fi
 }
 
-# Syntax highlighting
-highlight() {
-    sed \
-        -e "s/^# \(.*\)/${BOLD}${BLUE}\1${RESET}/g" \
-        -e "s/^## \(.*\)/${BOLD}${GREEN}\1${RESET}/g" \
-        -e "s/^### \(.*\)/${BOLD}${YELLOW}\1${RESET}/g" \
-        -e "s/\*\*\([^*]*\)\*\*/${BOLD}\1${RESET}/g"
+# Apply syntax highlighting to markdown content
+highlight_content() {
+    local format="${1:-plain}"
+    
+    case "$format" in
+        plain)
+            # Apply ANSI color highlighting for terminal display
+            sed \
+                -e "s/^# \(.*\)/${BOLD}${BLUE}\1${RESET}/g" \
+                -e "s/^## \(.*\)/${BOLD}${GREEN}\1${RESET}/g" \
+                -e "s/^### \(.*\)/${BOLD}${YELLOW}\1${RESET}/g" \
+                -e "s/\*\*\([^*]*\)\*\*/${BOLD}\1${RESET}/g" \
+                -e "s/\`\([^\`]*\)\`/${CYAN}\1${RESET}/g"
+            ;;
+        markdown|md)
+            # Raw markdown output
+            cat
+            ;;
+        json)
+            # Simple JSON wrapper
+            printf '{"tool":"%s","content":"' "$2"
+            sed 's/"/\\"/g' | tr -d '\n'
+            printf '"}'
+            ;;
+        *)
+            log_warning "Unknown format: $format, using plain"
+            highlight_content plain
+            ;;
+    esac
 }
 
-# Commands
-cmd_list() {
-    fetch_repos | while read -r repo; do
-        printf "${CYAN}%s${RESET}\n" "$repo"
-    done
+# Parse repository JSON and extract names
+parse_repository_list() {
+    # Extract repository names from GitHub API JSON response
+    sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' | \
+    grep -v -E '^(cheatsheetz\.github\.io|community|template|cli)$' | \
+    sort
 }
 
+# Command implementations
 cmd_search() {
-    [ -z "$1" ] && error "Search term required"
-    fetch_repos | grep -i "$1" | while read -r repo; do
-        printf "${GREEN}%s${RESET}\n" "$repo"
+    local search_term="$1"
+    
+    [ -z "$search_term" ] && log_error "Search term is required"
+    
+    log_info "Searching for '$search_term'..."
+    
+    local found=0
+    fetch_repositories | parse_repository_list | while read -r repo; do
+        if echo "$repo" | grep -qi "$search_term"; then
+            printf "${GREEN}%-25s${RESET} Repository\n" "$repo"
+            found=1
+        fi
     done
+    
+    [ "$found" = "0" ] && log_warning "No cheat sheets found matching '$search_term'"
 }
 
 cmd_show() {
-    [ -z "$1" ] && error "Tool name required"
-    printf "${BOLD}=== %s ===${RESET}\n\n" "$1"
-    fetch_sheet "$1" | highlight
+    local tool="$1"
+    local format="${FORMAT:-plain}"
+    
+    [ -z "$tool" ] && log_error "Tool name is required"
+    
+    printf "${BOLD}=== CheetSheetz: %s ===${RESET}\n\n" "$tool"
+    fetch_cheat_sheet "$tool" | highlight_content "$format" "$tool"
+}
+
+cmd_list() {
+    log_info "Fetching available cheat sheets..."
+    
+    local count=0
+    fetch_repositories | parse_repository_list | while read -r repo; do
+        printf "${CYAN}%-25s${RESET}\n" "$repo"
+        count=$((count + 1))
+    done
+    
+    [ "${VERBOSE:-0}" = "1" ] && log_info "Found $count cheat sheets"
 }
 
 cmd_categories() {
-cat << 'EOF'
-CheetSheetz Categories:
+    cat << EOF
+${BOLD}CheetSheetz Categories:${RESET}
 
-languages     Programming languages
-frameworks    Web frameworks  
-tools         Development tools
-devops        DevOps & infrastructure
-databases     Database systems
-mobile        Mobile development
-testing       Testing & security
-enterprise    Enterprise platforms
+${CYAN}languages${RESET}     Programming languages (Python, JavaScript, Go, etc.)
+${CYAN}frameworks${RESET}    Web frameworks (React, Django, Express, etc.)
+${CYAN}tools${RESET}         Development tools (Git, Docker, Vim, etc.)
+${CYAN}devops${RESET}        DevOps & infrastructure (AWS, Kubernetes, etc.)
+${CYAN}databases${RESET}     Database systems (MySQL, MongoDB, Redis, etc.)
+${CYAN}mobile${RESET}        Mobile development (React Native, Flutter, etc.)
+${CYAN}testing${RESET}       Testing & security (Jest, OWASP, Cypress, etc.)
+${CYAN}enterprise${RESET}    Enterprise platforms (SAP, Salesforce, etc.)
+
+${BOLD}Usage:${RESET} $PROGRAM_NAME list
 EOF
 }
 
 cmd_update() {
+    log_info "Clearing local cache..."
     rm -rf "$CACHE_DIR"
-    success "Cache cleared"
+    ensure_cache_dir
+    log_success "Cache cleared. Next command will fetch fresh data."
+}
+
+cmd_config() {
+    cat << EOF
+${BOLD}CheetSheetz Configuration:${RESET}
+
+Program: $PROGRAM_NAME v$VERSION
+Cache directory: $CACHE_DIR
+Config directory: $CONFIG_DIR
+Cache expiry: ${CACHE_EXPIRY}s ($(( CACHE_EXPIRY / 60 )) minutes)
+GitHub organization: $GITHUB_ORG
+API base URL: $API_BASE
+
+${BOLD}Environment Variables:${RESET}
+NO_COLOR: ${NO_COLOR:-not set}
+CHEATSHEETZ_CACHE: ${CHEATSHEETZ_CACHE:-not set}
+CHEATSHEETZ_API: ${CHEATSHEETZ_API:-not set}
+XDG_CACHE_HOME: ${XDG_CACHE_HOME:-not set}
+XDG_CONFIG_HOME: ${XDG_CONFIG_HOME:-not set}
+EOF
 }
 
 cmd_version() {
     printf "%s version %s\n" "$PROGRAM_NAME" "$VERSION"
-    printf "GitHub: https://github.com/%s\n" "$GITHUB_ORG"
+    printf "GitHub organization: https://github.com/%s\n" "$GITHUB_ORG"
+    printf "Website: https://cheatsheetz.github.io\n"
+    printf "License: MIT\n"
+    
+    if [ "${VERBOSE:-0}" = "1" ]; then
+        printf "Cache directory: %s\n" "$CACHE_DIR"
+        printf "Shell: %s\n" "${SHELL:-unknown}"
+        printf "Platform: %s\n" "$(uname -s || echo unknown)"
+    fi
 }
 
-# Main
-main() {
-    case "${1:-help}" in
-        search|s) shift; cmd_search "$@" ;;
-        show|view) shift; cmd_show "$@" ;;
-        list|ls) cmd_list ;;
-        categories|cat) cmd_categories ;;
-        update) cmd_update ;;
-        version|ver) cmd_version ;;
-        help|h) show_help ;;
-        --no-color) NO_COLOR=1; shift; main "$@" ;;
-        *) cmd_show "$1" ;;
+# POSIX-compatible argument parsing (no getopt dependency)
+parse_arguments() {
+    # Initialize option variables
+    QUIET=0
+    VERBOSE=0
+    FORMAT="plain"
+    CATEGORY=""
+    DIFFICULTY=""
+    
+    # Parse options manually
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            -v|--version)
+                cmd_version
+                exit 0
+                ;;
+            -q|--quiet)
+                QUIET=1
+                shift
+                ;;
+            -V|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -n|--no-color)
+                NO_COLOR=1
+                # Override color variables
+                RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' RESET=''
+                export NO_COLOR
+                shift
+                ;;
+            -f|--format)
+                [ -z "$2" ] && log_error "Option $1 requires an argument"
+                FORMAT="$2"
+                shift 2
+                ;;
+            -c|--category)
+                [ -z "$2" ] && log_error "Option $1 requires an argument"
+                CATEGORY="$2"
+                shift 2
+                ;;
+            -d|--difficulty)
+                [ -z "$2" ] && log_error "Option $1 requires an argument"
+                DIFFICULTY="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                ;;
+            *)
+                # First non-option argument is the command
+                break
+                ;;
+        esac
+    done
+    
+    # Store command and arguments
+    COMMAND="${1:-help}"
+    shift 2>/dev/null || true
+    ARGS="$*"
+}
+
+# Validate arguments
+validate_arguments() {
+    # Validate format
+    case "$FORMAT" in
+        plain|markdown|md|json) ;;
+        *) log_error "Invalid format: $FORMAT. Use: plain, markdown, json" ;;
+    esac
+    
+    # Validate difficulty
+    case "${DIFFICULTY:-}" in
+        ""|beginner|intermediate|advanced) ;;
+        *) log_error "Invalid difficulty: $DIFFICULTY. Use: beginner, intermediate, advanced" ;;
     esac
 }
 
+# Main command dispatcher
+dispatch_command() {
+    case "$COMMAND" in
+        search|s)
+            [ -z "$ARGS" ] && log_error "Search term required. Usage: $PROGRAM_NAME search <term>"
+            cmd_search $ARGS
+            ;;
+        show|view|get)
+            [ -z "$ARGS" ] && log_error "Tool name required. Usage: $PROGRAM_NAME show <tool>"
+            cmd_show $ARGS
+            ;;
+        list|ls)
+            cmd_list
+            ;;
+        categories|cat)
+            cmd_categories
+            ;;
+        update|refresh)
+            cmd_update
+            ;;
+        config|cfg)
+            cmd_config
+            ;;
+        version|ver)
+            cmd_version
+            ;;
+        help|"")
+            show_usage
+            ;;
+        *)
+            # Try to show as cheat sheet (fallback behavior for convenience)
+            log_info "Attempting to show '$COMMAND' as cheat sheet..."
+            cmd_show "$COMMAND"
+            ;;
+    esac
+}
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    # Cleanup handled by trap
+    exit $exit_code
+}
+
+# Set up signal handlers for graceful cleanup
+trap 'log_error "Interrupted by user"' INT TERM
+
+# Main execution function
+main() {
+    # Parse and validate command line arguments
+    parse_arguments "$@"
+    validate_arguments
+    
+    # Execute the requested command
+    dispatch_command
+}
+
+# Run main function with all arguments
 main "$@"

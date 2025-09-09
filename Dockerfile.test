@@ -1,0 +1,15 @@
+FROM alpine:latest
+
+# Install dependencies
+RUN apk add --no-cache curl bash
+
+# Copy CLI
+COPY bin/cheatsheetz /usr/local/bin/cheatsheetz
+RUN chmod +x /usr/local/bin/cheatsheetz
+
+# Test script
+COPY tests/test.sh /test.sh
+RUN chmod +x /test.sh
+
+# Default command
+CMD ["/test.sh"]

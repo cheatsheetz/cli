@@ -61,34 +61,25 @@ jobs:
             cp LICENSE "dist/$package_name/" 2>/dev/null || echo "MIT License" > "dist/$package_name/LICENSE"
             
             # Create install script for this platform
-            cat > "dist/$package_name/install.sh" << 'EOF'
-#!/bin/sh
-# CheetSheetz CLI installer
-set -e
-
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-PROGRAM_NAME="cheatsheetz"
-
-# Check if running as root or with sudo for system install
-if [ "$INSTALL_DIR" = "/usr/local/bin" ] && [ "$(id -u)" -ne 0 ]; then
-    echo "Installing to system directory requires sudo"
-    echo "Run: sudo ./install.sh"
-    echo "Or set custom directory: INSTALL_DIR=~/.local/bin ./install.sh"
-    exit 1
-fi
-
-# Create install directory if it doesn't exist
-mkdir -p "$INSTALL_DIR"
-
-# Copy binary
-cp "$PROGRAM_NAME" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/$PROGRAM_NAME"
-
-echo "✓ CheetSheetz CLI installed to $INSTALL_DIR/$PROGRAM_NAME"
-echo ""
-echo "Usage: $PROGRAM_NAME help"
-echo "Try: $PROGRAM_NAME show git"
-EOF
+            echo "#!/bin/sh" > "dist/$package_name/install.sh"
+            echo "# CheetSheetz CLI installer" >> "dist/$package_name/install.sh"
+            echo "set -e" >> "dist/$package_name/install.sh"
+            echo "" >> "dist/$package_name/install.sh"
+            echo "INSTALL_DIR=\"\${INSTALL_DIR:-/usr/local/bin}\"" >> "dist/$package_name/install.sh"
+            echo "PROGRAM_NAME=\"cheatsheetz\"" >> "dist/$package_name/install.sh"
+            echo "" >> "dist/$package_name/install.sh"
+            echo "if [ \"\$INSTALL_DIR\" = \"/usr/local/bin\" ] && [ \"\$(id -u)\" -ne 0 ]; then" >> "dist/$package_name/install.sh"
+            echo "    echo \"Installing to system directory requires sudo\"" >> "dist/$package_name/install.sh"
+            echo "    echo \"Run: sudo ./install.sh\"" >> "dist/$package_name/install.sh"
+            echo "    exit 1" >> "dist/$package_name/install.sh"
+            echo "fi" >> "dist/$package_name/install.sh"
+            echo "" >> "dist/$package_name/install.sh"
+            echo "mkdir -p \"\$INSTALL_DIR\"" >> "dist/$package_name/install.sh"
+            echo "cp \"\$PROGRAM_NAME\" \"\$INSTALL_DIR/\"" >> "dist/$package_name/install.sh"
+            echo "chmod +x \"\$INSTALL_DIR/\$PROGRAM_NAME\"" >> "dist/$package_name/install.sh"
+            echo "" >> "dist/$package_name/install.sh"
+            echo "echo \"✓ CheetSheetz CLI installed to \$INSTALL_DIR/\$PROGRAM_NAME\"" >> "dist/$package_name/install.sh"
+            echo "echo \"Usage: \$PROGRAM_NAME help\"" >> "dist/$package_name/install.sh"
             chmod +x "dist/$package_name/install.sh"
             
             # Create tarball
