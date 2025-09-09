@@ -1,0 +1,164 @@
+#!/bin/sh
+# CheetSheetz - POSIX CLI for developer cheat sheets
+# Single script, no dependencies, syntax highlighting
+
+set -e
+
+VERSION="1.0.0"
+PROGRAM_NAME="cheatsheetz"
+GITHUB_ORG="cheatsheetz"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$PROGRAM_NAME"
+
+# POSIX colors
+if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; RESET=''
+fi
+
+error() { printf "${RED}Error:${RESET} %s\n" "$*" >&2; exit 1; }
+info() { printf "${BLUE}Info:${RESET} %s\n" "$*"; }
+success() { printf "${GREEN}✓${RESET} %s\n" "$*"; }
+
+show_help() {
+cat << 'EOF'
+CheetSheetz CLI - Quick developer reference
+
+USAGE:
+    cheatsheetz <command> [options]
+
+COMMANDS:
+    search <term>     Search cheat sheets
+    show <tool>       Display cheat sheet  
+    list              List all sheets
+    categories        Show categories
+    update            Clear cache
+    version           Show version
+    help              Show help
+
+OPTIONS:
+    --no-color        Disable colors
+    --format plain    Output format
+
+EXAMPLES:
+    cheatsheetz show git
+    cheatsheetz search docker
+    cheatsheetz list
+EOF
+}
+
+# Cache management
+ensure_cache() { mkdir -p "$CACHE_DIR"; }
+
+is_cache_valid() {
+    local file="$1"
+    [ -f "$file" ] && [ $(($(date +%s) - $(stat -c %Y "$file" 2>/dev/null || echo 0))) -lt 3600 ]
+}
+
+# GitHub API calls
+fetch_repos() {
+    local cache="$CACHE_DIR/repos.txt"
+    if is_cache_valid "$cache"; then cat "$cache"; return; fi
+    
+    info "Fetching repository list..."
+    ensure_cache
+    
+    if command -v curl >/dev/null 2>&1; then
+        curl -s "https://api.github.com/orgs/$GITHUB_ORG/repos?per_page=100" | \
+        sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' | \
+        grep -v -E "(cheatsheetz.github.io|community|template|cli)" > "$cache"
+    else
+        echo "git\ndocker\npython\njavascript" > "$cache"
+    fi
+    cat "$cache"
+}
+
+fetch_sheet() {
+    local tool="$1"
+    local cache="$CACHE_DIR/$tool.md"
+    if is_cache_valid "$cache"; then cat "$cache"; return; fi
+    
+    info "Fetching $tool cheat sheet..."
+    ensure_cache
+    
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$GITHUB_ORG/$tool/contents/README.md" > "$cache" 2>/dev/null || \
+            error "Cheat sheet '$tool' not found"
+    else
+        error "curl required for fetching cheat sheets"
+    fi
+    cat "$cache"
+}
+
+# Syntax highlighting
+highlight() {
+    sed \
+        -e "s/^# \(.*\)/${BOLD}${BLUE}\1${RESET}/g" \
+        -e "s/^## \(.*\)/${BOLD}${GREEN}\1${RESET}/g" \
+        -e "s/^### \(.*\)/${BOLD}${YELLOW}\1${RESET}/g" \
+        -e "s/\*\*\([^*]*\)\*\*/${BOLD}\1${RESET}/g"
+}
+
+# Commands
+cmd_list() {
+    fetch_repos | while read -r repo; do
+        printf "${CYAN}%s${RESET}\n" "$repo"
+    done
+}
+
+cmd_search() {
+    [ -z "$1" ] && error "Search term required"
+    fetch_repos | grep -i "$1" | while read -r repo; do
+        printf "${GREEN}%s${RESET}\n" "$repo"
+    done
+}
+
+cmd_show() {
+    [ -z "$1" ] && error "Tool name required"
+    printf "${BOLD}=== %s ===${RESET}\n\n" "$1"
+    fetch_sheet "$1" | highlight
+}
+
+cmd_categories() {
+cat << 'EOF'
+CheetSheetz Categories:
+
+languages     Programming languages
+frameworks    Web frameworks  
+tools         Development tools
+devops        DevOps & infrastructure
+databases     Database systems
+mobile        Mobile development
+testing       Testing & security
+enterprise    Enterprise platforms
+EOF
+}
+
+cmd_update() {
+    rm -rf "$CACHE_DIR"
+    success "Cache cleared"
+}
+
+cmd_version() {
+    printf "%s version %s\n" "$PROGRAM_NAME" "$VERSION"
+    printf "GitHub: https://github.com/%s\n" "$GITHUB_ORG"
+}
+
+# Main
+main() {
+    case "${1:-help}" in
+        search|s) shift; cmd_search "$@" ;;
+        show|view) shift; cmd_show "$@" ;;
+        list|ls) cmd_list ;;
+        categories|cat) cmd_categories ;;
+        update) cmd_update ;;
+        version|ver) cmd_version ;;
+        help|h) show_help ;;
+        --no-color) NO_COLOR=1; shift; main "$@" ;;
+        *) cmd_show "$1" ;;
+    esac
+}
+
+main "$@"

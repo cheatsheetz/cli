@@ -1,0 +1,175 @@
+name: Build and Release CheetSheetz CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get version from tag
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION=${GITHUB_REF#refs/tags/}
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+    
+    - name: Update version in CLI
+      run: |
+        sed -i 's/VERSION=".*"/VERSION="${{ steps.version.outputs.version_number }}"/' bin/cheatsheetz
+    
+    - name: Create release packages
+      run: |
+        mkdir -p dist
+        
+        # Create different platform packages
+        for os in linux darwin freebsd openbsd; do
+          for arch in amd64 386 arm64; do
+            # Skip invalid combinations
+            case "$os-$arch" in
+              freebsd-arm64|openbsd-arm64) continue ;;
+            esac
+            
+            package_name="cheatsheetz-$os-$arch"
+            mkdir -p "dist/$package_name"
+            
+            # Copy CLI files
+            cp bin/cheatsheetz "dist/$package_name/"
+            cp README.md "dist/$package_name/"
+            cp LICENSE "dist/$package_name/" 2>/dev/null || echo "MIT License" > "dist/$package_name/LICENSE"
+            
+            # Create install script for this platform
+            cat > "dist/$package_name/install.sh" << 'EOF'
+#!/bin/sh
+# CheetSheetz CLI installer
+set -e
+
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+PROGRAM_NAME="cheatsheetz"
+
+# Check if running as root or with sudo for system install
+if [ "$INSTALL_DIR" = "/usr/local/bin" ] && [ "$(id -u)" -ne 0 ]; then
+    echo "Installing to system directory requires sudo"
+    echo "Run: sudo ./install.sh"
+    echo "Or set custom directory: INSTALL_DIR=~/.local/bin ./install.sh"
+    exit 1
+fi
+
+# Create install directory if it doesn't exist
+mkdir -p "$INSTALL_DIR"
+
+# Copy binary
+cp "$PROGRAM_NAME" "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/$PROGRAM_NAME"
+
+echo "✓ CheetSheetz CLI installed to $INSTALL_DIR/$PROGRAM_NAME"
+echo ""
+echo "Usage: $PROGRAM_NAME help"
+echo "Try: $PROGRAM_NAME show git"
+EOF
+            chmod +x "dist/$package_name/install.sh"
+            
+            # Create tarball
+            cd dist
+            tar -czf "$package_name.tar.gz" "$package_name"
+            cd ..
+          done
+        done
+        
+        # Create universal POSIX shell script (no compilation needed)
+        cp bin/cheatsheetz dist/cheatsheetz
+        chmod +x dist/cheatsheetz
+    
+    - name: Generate checksums
+      run: |
+        cd dist
+        sha256sum *.tar.gz cheatsheetz > checksums.txt
+        echo "Generated checksums:"
+        cat checksums.txt
+    
+    - name: Create Release Notes
+      run: |
+        cat > release-notes.md << EOF
+        # CheetSheetz CLI ${{ steps.version.outputs.version }}
+        
+        Quick reference CLI tool for the CheetSheetz developer reference collection.
+        
+        ## Features
+        - 🔍 Search across 400+ cheat sheets
+        - 📋 Display cheat sheets with syntax highlighting  
+        - 📱 POSIX-compliant (works on Linux, macOS, BSD)
+        - ⚡ Fast caching for offline use
+        - 🎨 Colored output with --no-color option
+        - 📦 Multiple output formats (plain, markdown, json)
+        
+        ## Quick Start
+        \`\`\`bash
+        # Download and install
+        curl -L https://github.com/cheatsheetz/cli/releases/download/${{ steps.version.outputs.version }}/cheatsheetz -o cheatsheetz
+        chmod +x cheatsheetz
+        sudo mv cheatsheetz /usr/local/bin/
+        
+        # Or use platform-specific package
+        wget https://github.com/cheatsheetz/cli/releases/download/${{ steps.version.outputs.version }}/cheatsheetz-linux-amd64.tar.gz
+        tar -xzf cheatsheetz-linux-amd64.tar.gz
+        cd cheatsheetz-linux-amd64
+        sudo ./install.sh
+        \`\`\`
+        
+        ## Usage
+        \`\`\`bash
+        cheatsheetz search docker      # Search for docker-related sheets
+        cheatsheetz show git           # Display git cheat sheet
+        cheatsheetz list              # List all available sheets
+        cheatsheetz categories        # Show categories
+        \`\`\`
+        
+        ## Platform Support
+        - ✅ Linux (amd64, 386, arm64)
+        - ✅ macOS (amd64, arm64) 
+        - ✅ FreeBSD (amd64, 386)
+        - ✅ OpenBSD (amd64, 386)
+        - ✅ Universal POSIX shell script
+        EOF
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        name: CheetSheetz CLI ${{ steps.version.outputs.version }}
+        body_path: release-notes.md
+        draft: false
+        prerelease: false
+        files: |
+          dist/*.tar.gz
+          dist/cheatsheetz
+          dist/checksums.txt
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Output release info
+      run: |
+        echo "🚀 Released CheetSheetz CLI ${{ steps.version.outputs.version }}"
+        echo "📦 Packages created for multiple platforms"
+        echo "🔗 https://github.com/cheatsheetz/cli/releases/tag/${{ steps.version.outputs.version }}"
