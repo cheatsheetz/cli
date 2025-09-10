@@ -2,7 +2,7 @@
 # CheetSheetz CLI - POSIX-compliant developer cheat sheet tool
 # Best practices: proper error handling, argument parsing, and modular design
 
-set -euo pipefail
+set -eu
 
 # Program information
 readonly PROGRAM_NAME="cheatsheetz"
